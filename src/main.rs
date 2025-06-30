@@ -1,13 +1,13 @@
 use std::str::FromStr;
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
-use solana_sdk::signature::{Keypair, Signer};
-use solana_client::nonblocking::rpc_client::RpcClient;  // Changed to nonblocking
-use solana_sdk::pubkey::Pubkey;
-use solana_sdk::{system_instruction::transfer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use solana_sdk::{
+    pubkey::Pubkey,
+    signature::{Keypair, Signer},
+    system_instruction,
+};
 
-
-// Structs used for Requests
+// Request and Response Structs
 #[derive(Deserialize)]
 struct TransferRequest {
     from: String,
@@ -15,6 +15,26 @@ struct TransferRequest {
     lamports: u64,
 }
 
+#[derive(Serialize)]
+struct SuccessResponse {
+    success: bool,
+    data: InstructionResponse,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    success: bool,
+    error: String,
+}
+
+#[derive(Serialize)]
+struct InstructionResponse {
+    program_id: String,
+    accounts: Vec<String>,
+    instruction_data: String,
+}
+
+// Endpoint Handlers
 #[get("/keypair")]
 async fn generate_keypair() -> impl Responder {
     let wallet = Keypair::new();
@@ -23,47 +43,58 @@ async fn generate_keypair() -> impl Responder {
         "success": true,
         "data": {
             "pubkey": wallet.pubkey().to_string(), 
-            "secret": bs58::encode(wallet.secret_bytes()).into_string() 
+            "secret": bs58::encode(wallet.to_bytes()).into_string() 
         }
     }))
 }
 
 #[post("/send/sol")]
 async fn send_sol(req: web::Json<TransferRequest>) -> HttpResponse {
-
     // Validate from pubkey
-    if let Err(_) = Pubkey::from_str(&req.from) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "success": false,
-            "error": "Invalid from pubkey format"
-        }));
-    }
+    let from_pubkey = match Pubkey::from_str(&req.from) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid from pubkey format".to_string(),
+            });
+        }
+    };
 
     // Validate to pubkey
-    if let Err(_) = Pubkey::from_str(&req.to) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "success": false,
-            "error": "Invalid to pubkey format"
-        }));
-    }
+    let to_pubkey = match Pubkey::from_str(&req.to) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid to pubkey format".to_string(),
+            });
+        }
+    };
 
     // Validate lamports amount
     if req.lamports == 0 {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "success": false,
-            "error": "Lamports amount must be greater than 0"
-        }));
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Lamports amount must be greater than 0".to_string(),
+        });
     }
 
-    // If we get here, all validations passed
-    HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "from": req.from,
-        "to": req.to,
-        "lamports": req.lamports
-    }))
-}
+    // Create SOL transfer instruction
+    let instruction = system_instruction::transfer(&from_pubkey, &to_pubkey, req.lamports);
 
+    // Prepare response
+    let response = SuccessResponse {
+        success: true,
+        data: InstructionResponse {
+            program_id: solana_sdk::system_program::id().to_string(),
+            accounts: instruction.accounts.iter().map(|acc| acc.pubkey.to_string()).collect(),
+            instruction_data: bs58::encode(&instruction.data).into_string(),
+        },
+    };
+
+    HttpResponse::Ok().json(response)
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
